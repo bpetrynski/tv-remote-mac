@@ -1,0 +1,6 @@
+.DS_Store
+__pycache__/
+*.pyc
+.backup/
+# Credentials written by cli/titan-os-reference.py next to itself
+cli/titan-os-credentials.json

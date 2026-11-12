@@ -1,0 +1,37 @@
+{
+  "id": "appletv",
+  "name": "Apple TV",
+  "run": [
+    [
+      "~/.local/pipx/venvs/pyatv/bin/python",
+      "-I",
+      "driver.py"
+    ],
+    [
+      "{python}",
+      "-I",
+      "driver.py"
+    ]
+  ],
+  "requirements": [
+    "pyatv==0.16.0"
+  ],
+  "bonjour": [
+    "_companion-link._tcp"
+  ],
+  "install_hint": "Install it in Settings → Supported TVs (or: pipx install pyatv).",
+  "works": [
+    "Apple TV HD and Apple TV 4K with tvOS 15 or later, through the Companion protocol (pyatv). Tested on Apple TV 4K (3rd generation).",
+    "Navigation, OK, Back (Menu), Home, Play/Pause, volume, power and opening apps."
+  ],
+  "does_not_work": [
+    "Apple TV 3rd generation and older (no Companion protocol).",
+    "Volume level and now-playing info are not shown: the remote only sends volume steps."
+  ],
+  "notes": [
+    "Uses pyatv: from pipx (pipx install pyatv) if present, otherwise the app installs it into its own folder. Credentials live in ~/.pyatv.conf, shared with the atvremote CLI.",
+    "Volume keys work when the Apple TV controls the volume (HDMI-CEC to the TV, or HomePods).",
+    "Connecting to a sleeping Apple TV takes about 5 seconds; an awake one answers at once.",
+    "Typing (K) needs a selected text field on the Apple TV (search, login). There is no Return key over this protocol; search updates as you type."
+  ]
+}

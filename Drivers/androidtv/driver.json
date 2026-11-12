@@ -1,0 +1,33 @@
+{
+  "id": "androidtv",
+  "name": "Android TV / Google TV",
+  "run": [
+    [
+      "{python}",
+      "-I",
+      "driver.py"
+    ]
+  ],
+  "requirements": [
+    "androidtvremote2==0.3.3",
+    "zeroconf>=0.130,<1"
+  ],
+  "bonjour": [
+    "_androidtvremote2._tcp"
+  ],
+  "install_hint": "Install it in Settings → Supported TVs.",
+  "works": [
+    "Android TV and Google TV devices that work with Google's TV remote app (Android TV Remote protocol v2, ports 6466/6467): Sony, TCL, Hisense, Philips and Sharp Android/Google TVs, Chromecast with Google TV, Google TV Streamer, Nvidia Shield, set-top boxes. Discovery tested on an SDMC G1 box.",
+    "All remote buttons, power, volume steps with the volume level shown, typing text, and opening popular apps."
+  ],
+  "does_not_work": [
+    "Fire TV (Amazon's Fire OS has no Android TV Remote service).",
+    "Old Chromecasts without a remote (Cast-only devices).",
+    "A list of installed apps: the protocol cannot read it, so the app menu offers popular apps."
+  ],
+  "notes": [
+    "Pairing shows a 6-character code on the TV.",
+    "The driver needs Python packages androidtvremote2 and zeroconf; the app installs them into its own folder.",
+    "Typing (K): the first text you type reconnects with the keyboard channel on, so the TV shows \"use the keyboard on your mobile device\" in place of its own keyboard until the app reconnects."
+  ]
+}
