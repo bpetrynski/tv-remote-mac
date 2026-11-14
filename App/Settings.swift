@@ -145,6 +145,16 @@ struct TVsSettings: View {
                                 }
                                 .help("For a box on another TV's HDMI input: volume and mute go to that TV.")
                             }
+                            if let script = Drivers.named(tv.driver) as? ScriptDriver {
+                                ForEach(script.manifest.options ?? [], id: \.self) { option in
+                                    Toggle(option.title, isOn: Binding(
+                                        get: { tv.options?[option.id] ?? false },
+                                        set: { model.setOption(tv.id, option.id, to: $0) }))
+                                        .toggleStyle(.checkbox)
+                                        .font(.system(size: 11))
+                                        .help(option.help ?? "")
+                                }
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         Spacer()
@@ -193,6 +203,11 @@ struct SupportedTVsSettings: View {
                     ForEach(driver.info.notes, id: \.self) { line(.note, $0) }
                     if case .unavailable(let reason) = status[driver.id] {
                         line(.problem, reason)
+                    }
+                    if let script = driver as? ScriptDriver {
+                        ForEach(script.manifest.options ?? [], id: \.self) { option in
+                            line(.note, "\(option.title) (per TV, in Settings → TVs): \(option.help ?? "")")
+                        }
                     }
                     if let script = driver as? ScriptDriver, script.manifest.requirements?.isEmpty == false,
                        status[driver.id] != .ready || script.needsInstall {
@@ -297,3 +312,4 @@ struct SupportedTVsSettings: View {
         NSWorkspace.shared.open(folder)
     }
 }
+

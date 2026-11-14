@@ -17,6 +17,12 @@ enum MediaKeys {
     }
 
     private static var targets: [(MPRemoteCommand, Any)] = []
+    /// The TV's play state if its driver reports one; nil = unknown.
+    private static var playing: Bool?
+
+    /// "Paused" only when the TV says so. Unknown counts as playing: that keeps the app
+    /// first in line for the keys.
+    private static var shown: MPNowPlayingPlaybackState { playing == false ? .paused : .playing }
 
     /// Takes the keys (or gives them back) and shows the active TV as Now Playing.
     static func apply(_ model: RemoteModel) {
@@ -25,6 +31,7 @@ enum MediaKeys {
         targets = []
 
         let info = MPNowPlayingInfoCenter.default()
+        playing = model.state.playing
         guard enabled, let tv = model.active else {
             info.nowPlayingInfo = nil
             info.playbackState = .stopped
@@ -49,13 +56,20 @@ enum MediaKeys {
             MPMediaItemPropertyTitle: tv.name,
             MPMediaItemPropertyArtist: "TV Remote",
         ]
-        // "Playing" keeps the app first in line for the keys; the TV's real state is unknown.
-        info.playbackState = .playing
+        info.playbackState = shown
+    }
+
+    /// The TV's play state changed (or became unknown).
+    static func update(playing: Bool?) {
+        guard playing != self.playing else { return }
+        self.playing = playing
+        guard !targets.isEmpty else { return }
+        MPNowPlayingInfoCenter.default().playbackState = shown
     }
 
     /// Announces the TV again after another app took over Now Playing.
     static func reclaim() {
         guard !targets.isEmpty else { return }
-        MPNowPlayingInfoCenter.default().playbackState = .playing
+        MPNowPlayingInfoCenter.default().playbackState = shown
     }
 }

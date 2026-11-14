@@ -13,11 +13,12 @@ import asyncio
 import json
 import logging
 import sys
+import time
 
 try:
     import pyatv
-    from pyatv.const import (FeatureName, FeatureState, KeyboardFocusState, OperatingSystem,
-                             PowerState, Protocol)
+    from pyatv.const import (DeviceState, FeatureName, FeatureState, KeyboardFocusState,
+                             OperatingSystem, PowerState, Protocol)
     from pyatv.interface import DeviceListener
     from pyatv.storage.file_storage import FileStorage
 except ImportError:  # reported by `hello`, so the app can show what to install
@@ -52,6 +53,21 @@ def _actions():
     }
 
 
+class _PlayerListener(DeviceListener):
+    """Drops the AirPlay link when it dies, so the next status reconnects it."""
+
+    def __init__(self, driver, player):
+        self.driver = driver
+        self.player = player
+
+    def connection_lost(self, exception):
+        self.connection_closed()
+
+    def connection_closed(self):
+        if self.driver.player is self.player:
+            self.driver.player = None
+
+
 class Driver(DeviceListener):
     def __init__(self, loop):
         self.loop = loop
@@ -61,7 +77,15 @@ class Driver(DeviceListener):
         self.apps = []
         self.apps_task = None
         self.pairing = None
+        self.pairing_protocol = None
+        self.pair_conf = None
         self.already_paired = False
+        # Second, read-only link over AirPlay for the play state (Companion has none).
+        self.player = None
+        self.player_task = None
+        self.player_tried = 0.0
+        self.tv = None  # {"id", "host"} of the connected Apple TV
+        self.play_state = False  # option "play_state" (Settings): off unless turned on
 
     # -- helpers ---------------------------------------------------------------
 
@@ -105,6 +129,61 @@ class Driver(DeviceListener):
     def connection_closed(self):
         self.atv = None
 
+    # -- play state ----------------------------------------------------------------
+
+    def _start_player(self, tv):
+        """Opens the AirPlay link in the background, at most every 30 s. It needs AirPlay
+        credentials (`atvremote --protocol airplay pair`); without them the play state stays
+        unknown and the app treats the TV as playing."""
+        if not self.play_state or tv is None or self.player or (self.player_task and not self.player_task.done()):
+            return
+        if time.monotonic() - self.player_tried < 30:
+            return
+        self.player_tried = time.monotonic()
+        self.player_task = self.loop.create_task(self._connect_player(tv, self.atv))
+
+    async def _connect_player(self, tv, owner):
+        try:
+            confs = await self._scan(identifier=tv["id"], hosts=[tv["host"]], timeout=2)
+            airplay = confs[0].get_service(Protocol.AirPlay) if confs else None
+            if airplay is None or not airplay.credentials:
+                log.info("no AirPlay credentials: play state unknown")
+                return
+            for service in confs[0].services:
+                if service.protocol not in (Protocol.AirPlay, Protocol.MRP):
+                    service.enabled = False
+            player = await pyatv.connect(confs[0], self.loop, storage=await self._storage())
+        except Exception as e:  # the remote works without it
+            log.info("play state not available: %s", e)
+            return
+        if owner is not self.atv or owner is None:  # disconnected or switched TVs meanwhile
+            log.info("play state link dropped: the TV changed meanwhile")
+            player.close()
+            return
+        log.info("play state link up")
+        player.listener = _PlayerListener(self, player)
+        self.player = player
+
+    def _close_player(self):
+        if self.player_task and not self.player_task.done():
+            self.player_task.cancel()
+        self.player_task = None
+        if self.player is not None:
+            player, self.player = self.player, None
+            player.close()
+
+    async def _playing(self):
+        """True/False from the AirPlay link, None if unknown."""
+        if self.player is None:
+            return None
+        try:
+            playing = await asyncio.wait_for(self.player.metadata.playing(), 1)
+        except Exception as e:
+            log.info("play state read failed: %s", e)
+            self._close_player()
+            return None
+        return playing.device_state in (DeviceState.Playing, DeviceState.Loading, DeviceState.Seeking)
+
     # -- operations --------------------------------------------------------------
 
     async def op_hello(self, req):
@@ -121,22 +200,49 @@ class Driver(DeviceListener):
             if self._is_apple_tv(c)
         ]
 
+    # Pairing takes up to two PINs: Companion for the remote, then AirPlay for the play
+    # state (only with the "play_state" option on). Either is skipped when ~/.pyatv.conf
+    # already has its credentials.
+
     async def op_pair_begin(self, req):
         tv = req["tv"]
         await self._close_pairing()
+        self.play_state = bool((req.get("options") or {}).get("play_state"))
         confs = await self._scan(identifier=tv["id"], hosts=[tv["host"]])
         if not confs:
             raise DriverError("The Apple TV is not answering. Make sure it is awake.")
+        self.pair_conf = confs[0]
         companion = confs[0].get_service(Protocol.Companion)
         if companion is not None and companion.credentials:
-            # Already paired (here or with atvremote): no PIN needed.
+            # The remote is paired (here or with atvremote); maybe the play state is not.
+            prompt = await self._begin_airplay()
+            if prompt:
+                return {"prompt": prompt}
             self.already_paired = True
             return {"paired": True}
-        storage = await self._storage()
-        self.pairing = await pyatv.pair(confs[0], Protocol.Companion, self.loop,
-                                        storage=storage, name="TV Remote")
-        await self.pairing.begin()
+        await self._begin(Protocol.Companion)
         return {"prompt": f"Enter the PIN shown on {confs[0].name}."}
+
+    async def _begin(self, protocol):
+        self.pairing = await pyatv.pair(self.pair_conf, protocol, self.loop,
+                                        storage=await self._storage(), name="TV Remote")
+        self.pairing_protocol = protocol
+        await self.pairing.begin()
+
+    async def _begin_airplay(self):
+        """Starts AirPlay pairing if it is missing. Returns the prompt, or None when there is
+        nothing to pair or the Apple TV refuses (the remote then works without play state)."""
+        airplay = self.pair_conf.get_service(Protocol.AirPlay)
+        if not self.play_state or airplay is None or airplay.credentials:
+            return None
+        try:
+            await self._begin(Protocol.AirPlay)
+        except Exception as e:
+            log.warning("AirPlay pairing not started: %s", e)
+            await self._close_pairing()
+            return None
+        return (f"One more PIN from {self.pair_conf.name}: it lets the Mac see whether "
+                "something is playing.")
 
     async def op_pair_finish(self, req):
         if self.already_paired:
@@ -148,14 +254,22 @@ class Driver(DeviceListener):
         if not pin.isdigit():
             raise DriverError("The PIN is made of digits.")
         self.pairing.pin(int(pin))
+        protocol = self.pairing_protocol
         try:
             await self.pairing.finish()
             paired = self.pairing.has_paired
+        except Exception as e:
+            log.warning("%s pairing failed: %s", protocol, e)
+            paired = False
         finally:
             await self._close_pairing()
         if not paired:
             raise DriverError("Wrong PIN. Start again to get a new one.")
         await (await self._storage()).save()
+        if protocol == Protocol.Companion:
+            prompt = await self._begin_airplay()
+            if prompt:
+                return {"prompt": prompt}  # the app asks for the next PIN
         return {"data": {}}
 
     async def op_pair_cancel(self, req):
@@ -171,6 +285,8 @@ class Driver(DeviceListener):
     async def op_connect(self, req):
         tv = req["tv"]
         await self.op_disconnect(req)
+        self.player_tried = 0.0
+        self.play_state = bool((req.get("options") or {}).get("play_state"))
         # Only the saved address: if the device moved, the app finds it (Bonjour) and retries.
         confs = await self._scan(identifier=tv["id"], hosts=[tv["host"]], timeout=2)
         if not confs:
@@ -200,6 +316,8 @@ class Driver(DeviceListener):
         # The app list can take seconds (or fail) while the Apple TV sleeps: load it later.
         self.apps = []
         self._load_apps()
+        self.tv = {"id": tv["id"], "host": str(conf.address)}
+        self._start_player(self.tv)
         return {"host": str(conf.address), "actions": sorted(actions)}
 
     def _load_apps(self):
@@ -219,6 +337,7 @@ class Driver(DeviceListener):
         self.apps_task = self.loop.create_task(load(self.atv))
 
     async def op_disconnect(self, req):
+        self._close_player()
         if self.atv is not None:
             atv, self.atv = self.atv, None
             atv.close()
@@ -252,6 +371,10 @@ class Driver(DeviceListener):
         state = atv.power.power_state
         result = {"power": {PowerState.On: "On", PowerState.Off: "Standby"}.get(state, "connected")}
         self._load_apps()  # retried until the Apple TV is awake enough to answer
+        self._start_player(self.tv)  # retried if it failed or dropped
+        playing = await self._playing()
+        if playing is not None:
+            result["playing"] = playing
         if self.apps:
             result["picker"] = {"id": "apps", "label": "App", "symbol": "square.grid.2x2",
                                 "options": self.apps, "current": None}

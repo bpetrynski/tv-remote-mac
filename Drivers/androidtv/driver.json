@@ -10,7 +10,8 @@
   ],
   "requirements": [
     "androidtvremote2==0.3.3",
-    "zeroconf>=0.130,<1"
+    "zeroconf>=0.130,<1",
+    "adb-shell[async]==0.4.4"
   ],
   "bonjour": [
     "_androidtvremote2._tcp"
@@ -29,5 +30,12 @@
     "Pairing shows a 6-character code on the TV.",
     "The driver needs Python packages androidtvremote2 and zeroconf; the app installs them into its own folder.",
     "Typing (K): the first text you type reconnects with the keyboard channel on, so the TV shows \"use the keyboard on your mobile device\" in place of its own keyboard until the app reconnects."
+  ],
+  "options": [
+    {
+      "id": "play_state",
+      "title": "Show play/pause state (ADB)",
+      "help": "The remote protocol does not report it, so it is read over ADB (port 5555). Needs Developer options → USB debugging (or Network debugging) on the TV; the first time, the TV asks to allow this Mac: tick \"Always allow\". Off: the Mac always shows the TV as playing."
+    }
   ]
 }

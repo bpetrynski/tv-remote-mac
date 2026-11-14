@@ -137,6 +137,8 @@ struct StoredTV: Codable, Identifiable, Equatable {
     /// Another paired TV that plays this one's sound (a box on a TV's HDMI input): volume
     /// and mute go there.
     var volumeVia: String? = nil
+    /// The driver's optional features switched on for this TV (driver.json "options").
+    var options: [String: Bool]? = nil
 }
 
 /// A TV seen on the network (or at a typed-in address) that can be paired.
@@ -156,6 +158,8 @@ struct TVState: Equatable {
     var volumeMax = 100
     var muted = false
     var picker: TVPicker?
+    /// Whether something plays on the TV; nil = the TV does not say (then assume it does).
+    var playing: Bool?
 }
 
 /// One extra control under the remote: the Ambilight style on Philips, apps on Apple TV.
@@ -196,12 +200,13 @@ enum TVError: LocalizedError {
     case pairing(String)
     case driver(String)          // the driver itself cannot work (e.g. a missing dependency)
     case failed(String)          // one request failed; the TV may just be offline
+    case anotherPin(String)      // pairing goes on: the TV shows one more PIN (the prompt)
 
     var errorDescription: String? {
         switch self {
         case .http(let code): "The TV answered with HTTP \(code)."
         case .unauthorized: "The TV rejected the saved credentials. Pair it again."
-        case .pairing(let reason), .driver(let reason), .failed(let reason): reason
+        case .pairing(let reason), .driver(let reason), .failed(let reason), .anotherPin(let reason): reason
         }
     }
 }

@@ -36,6 +36,7 @@ complete examples; copy one and change it.
 | `requirements` | Optional Python packages. `{python}` in `run` is then a private virtual environment that the app creates and fills on "Install" (with `uv` if available, else `python3 -m venv` + pip). |
 | `bonjour` | Optional Bonjour service types. The app browses for them (through macOS, so the driver never listens on a port and the firewall stays quiet) and passes the addresses to `discover` as `hosts`. Without it, `discover` gets no `hosts` and must search by itself. |
 | `works`, `does_not_work`, `notes` | Shown in Settings → Supported TVs. Be honest: say what you tested. |
+| `options` | Optional switches, set per paired TV in Settings → TVs and off by default: `[{"id": "play_state", "title": "…", "help": "…"}]`. Their values come with `connect` and `pair_begin` as `"options": {"play_state": true}`; switching one reconnects that TV if it is in use. |
 
 The environment variable `TVREMOTE_DATA` points to a folder the driver may use for its own
 files (certificates, keys). Write logs to **stderr**: the app keeps them in
@@ -70,7 +71,7 @@ stdin closes, the app has quit: disconnect and exit.
 | `hello` | – | `{"ready": true}` or `{"ready": false, "error": "what is missing"}` |
 | `discover` | `hosts` (optional list: check only these addresses; also used for an address typed by hand) | list of `{"id", "name", "host", "model"?}`. `id` must be stable per physical device (MAC, serial). |
 | `pair_begin` | `tv`: `{"id", "host"}` | `{"prompt": "Enter the PIN shown on the TV."}` — make the TV show its PIN |
-| `pair_finish` | `pin` | `{"data": {...}, "name"?, "host"?}` — `data` (strings only) is stored and passed back on `connect` |
+| `pair_finish` | `pin` | `{"data": {...}, "name"?, "host"?}` — `data` (strings only) is stored and passed back on `connect`. Or `{"prompt": "…"}` when the TV shows one more PIN: the app asks for it and calls `pair_finish` again. |
 | `pair_cancel` | – | `null` |
 | `connect` | `tv`: `{"id", "host", "name", "data"}` | `{"host": "current address", "actions": [...]}`. Try only the given address and fail fast: if the TV moved, the app runs `discover`, matches the `id` and calls `connect` again. |
 | `disconnect` | – | `null` |
@@ -93,6 +94,7 @@ remote hides the other buttons. `power` toggles: decide on or standby yourself.
 {
   "power": "On",
   "volume": 12, "volume_max": 100, "muted": false,
+  "playing": true,
   "picker": {
     "id": "apps", "label": "App", "symbol": "square.grid.2x2",
     "current": null,
@@ -102,7 +104,11 @@ remote hides the other buttons. `power` toggles: decide on or standby yourself.
 ```
 
 `power` is a short word shown in the header (`On` and `Standby` get colours). Omit
-`volume` if the TV does not report it. The optional `picker` adds one control under the
+`volume` if the TV does not report it. `playing` (optional) says whether something plays
+right now; the Mac's Now Playing shows it, and Space without a native toggle sends the
+opposite. Omit it if the TV does not report it: the app then assumes something plays.
+While a driver reports `playing`, the app asks for `status` every 2 seconds, so keep
+`status` fast. The optional `picker` adds one control under the
 remote: with `current` set it is a selection (like Ambilight styles), with `current: null`
 a menu of one-off actions (like opening apps). `symbol` is an SF Symbols name.
 

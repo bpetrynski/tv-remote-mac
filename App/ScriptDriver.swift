@@ -7,6 +7,13 @@ import Foundation
 
 // MARK: - Manifest
 
+/// An optional feature of a driver (driver.json "options"), switched on in Settings.
+struct DriverOption: Decodable, Hashable {
+    let id: String
+    let title: String
+    let help: String?
+}
+
 struct DriverManifest: Decodable {
     let id: String
     let name: String
@@ -24,9 +31,11 @@ struct DriverManifest: Decodable {
     let doesNotWork: [String]?
     let notes: [String]?
     let installHint: String?
+    /// Switches in Settings → Supported TVs, off until the user turns them on.
+    let options: [DriverOption]?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, run, works, notes, requirements, bonjour
+        case id, name, run, works, notes, requirements, bonjour, options
         case doesNotWork = "does_not_work"
         case installHint = "install_hint"
     }
@@ -172,6 +181,12 @@ final class ScriptDriver: TVDriver {
 
     var id: String { manifest.id }
     var name: String { manifest.name }
+    /// A TV's values of the driver's options (off unless switched on), sent with `connect`
+    /// and `pair_begin`.
+    func optionValues(_ chosen: [String: Bool]?) -> [String: Bool] {
+        Dictionary(uniqueKeysWithValues: (manifest.options ?? []).map { ($0.id, chosen?[$0.id] ?? false) })
+    }
+
     var info: DriverInfo {
         DriverInfo(works: manifest.works, doesNotWork: manifest.doesNotWork ?? [], notes: manifest.notes ?? [])
     }
@@ -205,7 +220,20 @@ final class ScriptDriver: TVDriver {
 
     /// The driver's private Python environment, used for "{python}".
     var environment: URL { TVStore.folder.appendingPathComponent("Python/\(id)") }
-    var needsInstall: Bool { !(manifest.requirements ?? []).isEmpty && command() == nil }
+    var needsInstall: Bool {
+        let reqs = manifest.requirements ?? []
+        guard !reqs.isEmpty else { return false }
+        guard let cmd = command() else { return true }
+        // The private environment predates a change of driver.json: install the new packages.
+        return cmd[0] == python && installed != reqs
+    }
+
+    private var python: String { environment.appendingPathComponent("bin/python").path }
+    /// Requirements the private environment was last filled with.
+    private var stamp: URL { environment.appendingPathComponent("tvremote-requirements.json") }
+    private var installed: [String]? {
+        (try? Data(contentsOf: stamp)).flatMap { try? JSONDecoder().decode([String].self, from: $0) }
+    }
 
     private static func which(_ program: String) -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -216,7 +244,6 @@ final class ScriptDriver: TVDriver {
 
     private func command() -> [String]? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let python = environment.appendingPathComponent("bin/python").path
         for candidate in manifest.run where !candidate.isEmpty {
             var cmd = candidate.map {
                 $0 == "{python}" ? python : $0.hasPrefix("~/") ? home + $0.dropFirst() : $0
@@ -285,6 +312,7 @@ final class ScriptDriver: TVDriver {
                 }
             }
         }.value
+        try? JSONEncoder().encode(reqs).write(to: stamp)
     }
 
     func call(_ op: String, _ params: [String: Any] = [:], timeout: TimeInterval = 20) async throws -> Any? {
@@ -328,7 +356,9 @@ final class ScriptDriver: TVDriver {
     }
 
     func beginPairing(_ tv: FoundTV) async throws -> String? {
-        let r = try await call("pair_begin", ["tv": ["id": tv.deviceID, "host": tv.host]], timeout: 30) as? [String: Any]
+        let r = try await call("pair_begin", ["tv": ["id": tv.deviceID, "host": tv.host],
+                                              "options": optionValues(RemoteModel.shared.tvs.first { $0.id == tv.id }?.options)],
+                         timeout: 30) as? [String: Any]
         pairingTV = tv
         if r?["paired"] as? Bool == true { return nil }
         return r?["prompt"] as? String ?? "Enter the PIN shown on \(tv.name)."
@@ -337,6 +367,9 @@ final class ScriptDriver: TVDriver {
     func finishPairing(pin: String) async throws -> StoredTV {
         guard let tv = pairingTV else { throw TVError.pairing("Start pairing first.") }
         let r = try await call("pair_finish", ["pin": pin], timeout: 30) as? [String: Any]
+        if r?["data"] == nil, let prompt = r?["prompt"] as? String {
+            throw TVError.anotherPin(prompt)
+        }
         pairingTV = nil
         var data = r?["data"] as? [String: String] ?? [:]
         data["id"] = tv.deviceID
@@ -380,7 +413,8 @@ final class ScriptConnection: TVConnection {
         // Status reads and key presses may arrive together: connect once.
         if let connecting { return try await connecting.value }
         let task = Task { @MainActor in
-            let r = try await driver.call("connect", ["tv": payload], timeout: 30) as? [String: Any]
+            let r = try await driver.call("connect", ["tv": payload, "options": driver.optionValues(tv.options)],
+                                          timeout: 30) as? [String: Any]
             actions = Set((r?["actions"] as? [String] ?? []).compactMap(RemoteAction.init(rawValue:)))
             if let host = r?["host"] as? String { tv.host = host }
             session = driver.generation
@@ -429,6 +463,7 @@ final class ScriptConnection: TVConnection {
         state.volume = (r["volume"] as? NSNumber)?.intValue
         state.volumeMax = (r["volume_max"] as? NSNumber)?.intValue ?? 100
         state.muted = r["muted"] as? Bool ?? false
+        state.playing = r["playing"] as? Bool
         if let p = r["picker"] as? [String: Any], let pid = p["id"] as? String {
             let options = (p["options"] as? [[String: Any]] ?? []).compactMap { o -> TVPicker.Option? in
                 guard let oid = o["id"] as? String else { return nil }
