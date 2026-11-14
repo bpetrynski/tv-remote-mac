@@ -56,6 +56,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$APP" 2>/dev/null || true
+# Same certificate every build: macOS keeps the Local Network permission (see make-cert.sh).
+# Without it the signature is ad hoc and the permission has to be granted after each build.
+IDENTITY="${TVREMOTE_SIGN_IDENTITY:-TV Remote Local Signing}"
+if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
+    codesign --force --deep --sign "$IDENTITY" "$APP"
+else
+    codesign --force --deep --sign - "$APP" 2>/dev/null || true
+    echo "Signed ad hoc: run ./make-cert.sh once to keep the Local Network permission across builds."
+fi
 
 echo "Built: $APP"
