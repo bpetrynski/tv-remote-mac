@@ -54,6 +54,9 @@ final class RemoteModel: ObservableObject {
     private var queue: [Command] = []
     private var worker: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
+    /// Re-reads the play state every few seconds, for TVs that report it (Apple TV with
+    /// AirPlay credentials), so the Mac's Now Playing follows a physical remote too.
+    private var playbackTask: Task<Void, Never>?
     /// Last local state change; a status read that started earlier must not overwrite it.
     private var editedAt = Date.distantPast
 
@@ -108,6 +111,8 @@ final class RemoteModel: ObservableObject {
         sentText = ""
         queue.removeAll()
         refreshTask?.cancel()
+        playbackTask?.cancel()
+        playbackTask = nil
         state = TVState()
         driverActions = []
         online = false
@@ -146,6 +151,10 @@ final class RemoteModel: ObservableObject {
 
     func adopt(_ tv: StoredTV) {
         if let i = store.tvs.firstIndex(where: { $0.id == tv.id }) {
+            // Paired again: new credentials, the user's choices stay.
+            var tv = tv
+            tv.volumeVia = store.tvs[i].volumeVia
+            tv.options = store.tvs[i].options
             store.tvs[i] = tv
         } else {
             store.tvs.append(tv)
@@ -173,6 +182,14 @@ final class RemoteModel: ObservableObject {
         store.tvs[i].volumeVia = target
         store.save()
         if id == store.active { open() }
+    }
+
+    func setOption(_ id: String, _ option: String, to on: Bool) {
+        guard let i = store.tvs.firstIndex(where: { $0.id == id }),
+              (store.tvs[i].options?[option] ?? false) != on else { return }
+        store.tvs[i].options = (store.tvs[i].options ?? [:]).merging([option: on]) { $1 }
+        store.save()
+        if id == store.active { open() }   // the driver gets the new value with `connect`
     }
 
     /// Asks first, then removes the TV and its credentials.
@@ -439,6 +456,7 @@ final class RemoteModel: ObservableObject {
             // Something changed from the keyboard while this read was running: it is stale.
             guard worker == nil, editedAt < started else { return true }
             state = s
+            playbackChanged(s.playing, on: c)
             return true
         } catch TVError.unauthorized {
             // The TV is there but no longer accepts our pairing; scanning will not help.
@@ -458,6 +476,34 @@ final class RemoteModel: ObservableObject {
             online = false
             state.power = "offline"
             return false
+        }
+    }
+}
+
+// MARK: - Play state
+
+extension RemoteModel {
+    /// Passes a newly read play state on, and polls while the TV reports one.
+    fileprivate func playbackChanged(_ playing: Bool?, on c: any TVConnection) {
+        MediaKeys.update(playing: playing)
+        guard let playing else { return }
+        // Space on TVs without a toggle key sends the opposite of what is happening.
+        assumePlaying = playing
+        guard playbackTask == nil else { return }
+        playbackTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self, !Task.isCancelled, c === self.connection else { return }
+                // Key presses go first; the next round reads the state.
+                guard self.worker == nil, let s = try? await c.readState(),
+                      !Task.isCancelled, c === self.connection else { continue }
+                if self.state.playing != s.playing { self.state.playing = s.playing }
+                MediaKeys.update(playing: s.playing)
+                if s.playing == nil { break }   // the TV stopped reporting it
+                self.assumePlaying = s.playing ?? true
+            }
+            // A cancelled task was already replaced (or dropped) by `open()`.
+            if !Task.isCancelled { self?.playbackTask = nil }
         }
     }
 }

@@ -27,6 +27,14 @@ try:
 except ImportError:  # reported by `hello`
     AndroidTVRemote = None
 
+try:  # optional: only for the play state
+    from adb_shell.adb_device_async import AdbDeviceTcpAsync
+    from adb_shell.auth.keygen import keygen
+    from adb_shell.auth.sign_pythonrsa import PythonRSASigner
+    from adb_shell.exceptions import DeviceAuthError, TcpTimeoutException
+except ImportError:
+    AdbDeviceTcpAsync = None
+
 log = logging.getLogger("androidtv")
 
 SERVICE = "_androidtvremote2._tcp.local."
@@ -34,6 +42,14 @@ CLIENT_NAME = "TV Remote"
 DATA = os.environ.get("TVREMOTE_DATA") or os.path.expanduser("~/Library/Application Support/TV Remote/androidtv")
 CERT = os.path.join(DATA, "cert.pem")
 KEY = os.path.join(DATA, "key.pem")
+ADB_KEY = os.path.join(DATA, "adbkey")
+ADB_PORT = 5555
+ADB_RETRY = 60  # seconds between attempts while ADB is off on the TV
+
+# PlaybackState codes (android.media.session.PlaybackState) that count as playing:
+# playing, fast forward, rewind, buffering, connecting, skipping.
+PLAYING_STATES = {3, 4, 5, 6, 8, 9, 10, 11}
+PAUSED = 2
 
 # Remote button -> Android key code (without the KEYCODE_ prefix).
 KEYS = {
@@ -209,6 +225,102 @@ class AppCatalog:
         return title, icon
 
 
+def parse_media_sessions(text):
+    """Play state from `dumpsys media_session`: True if a session plays, False if the
+    active one is paused, None if no app says (home screen, apps without a media session)."""
+    sessions = []  # (active, state)
+    active = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("package="):
+            active = None  # a new session starts
+        elif line.startswith("active="):
+            active = line == "active=true"
+        else:
+            # "state=3" on older Android, "state=PAUSED(2)" on newer.
+            m = re.match(r"state=PlaybackState \{state=(?:\w+\()?(\d+)", line)
+            if m:
+                sessions.append((active, int(m.group(1))))
+    if any(state in PLAYING_STATES for _, state in sessions):
+        return True
+    if any(active and state == PAUSED for active, state in sessions):
+        return False
+    return None
+
+
+class Adb:
+    """Optional ADB link, only to read the play state (the remote protocol has none).
+
+    Works when network ADB is on: Developer options → USB debugging (or "Network
+    debugging" on some boxes). The first time the TV asks to allow this Mac; tick "Always
+    allow". Without ADB the play state stays unknown and the app treats the TV as playing.
+    """
+
+    def __init__(self, loop):
+        self.loop = loop
+        self.device = None
+        self.host = None
+        self.task = None
+        self.tried = 0.0
+        self.refused = None  # host where the TV turned the key down: ask again only on connect
+
+    def start(self, host, fresh=False):
+        if AdbDeviceTcpAsync is None or host is None:
+            return
+        if fresh:
+            self.close()
+            self.refused = None
+            self.tried = 0.0
+        if self.device or (self.task and not self.task.done()) or self.refused == host:
+            return
+        if time.monotonic() - self.tried < ADB_RETRY:
+            return
+        self.tried = time.monotonic()
+        self.task = self.loop.create_task(self._connect(host))
+
+    async def _connect(self, host):
+        try:
+            if not os.path.exists(ADB_KEY):
+                os.makedirs(DATA, exist_ok=True)
+                keygen(ADB_KEY)
+                os.chmod(ADB_KEY, 0o600)
+            with open(ADB_KEY + ".pub") as pub, open(ADB_KEY) as priv:
+                signer = PythonRSASigner(pub.read(), priv.read())
+            device = AdbDeviceTcpAsync(host, ADB_PORT, default_transport_timeout_s=3)
+            # Long enough to tap "Allow" on the TV the first time.
+            await device.connect(rsa_keys=[signer], auth_timeout_s=30)
+        except (DeviceAuthError, TcpTimeoutException) as e:
+            # Turned down, or nobody answered the question on the TV. Asking every minute
+            # would keep a dialog on screen: ask again on the next connect.
+            log.warning("ADB: the TV did not allow this Mac (%s); asking again on the next connect", e)
+            self.refused = host
+            return
+        except Exception as e:
+            log.info("ADB not available on %s: %s", host, e)
+            return
+        self.device, self.host = device, host
+        log.info("ADB link up")
+
+    async def playing(self):
+        if self.device is None:
+            return None
+        try:
+            out = await asyncio.wait_for(self.device.shell("dumpsys media_session"), 2)
+        except Exception as e:
+            log.info("ADB read failed: %s", e)
+            self.close()
+            return None
+        return parse_media_sessions(out or "")
+
+    def close(self):
+        if self.task and not self.task.done():
+            self.task.cancel()
+        self.task = None
+        if self.device is not None:
+            device, self.device = self.device, None
+            self.loop.create_task(device.close())
+
+
 class DriverError(Exception):
     def __init__(self, message, code=None):
         super().__init__(message)
@@ -225,6 +337,8 @@ class Driver:
         self.ime = False
         self.field = None  # text of the focused field on the TV, when it has told us
         self.catalog = AppCatalog(loop) if AndroidTVRemote else None
+        self.adb = Adb(loop)
+        self.play_state = False  # option "play_state" (Settings): ADB only when turned on
 
     def _client(self, host, ime=False):
         # Without the IME channel the TV keeps its own on-screen keyboard. With it, a focused
@@ -327,10 +441,13 @@ class Driver:
         return None
 
     async def op_connect(self, req):
+        self.play_state = bool((req.get("options") or {}).get("play_state"))
+        if not self.play_state:
+            self.adb.close()
         return await self._connect(req["tv"], ime=False)
 
     async def _connect(self, tv, ime):
-        await self.op_disconnect({})
+        self._drop_remote()
         host = tv.get("host")
         remote = self._client(host, ime)
         try:
@@ -356,13 +473,20 @@ class Driver:
         if remote.current_app:
             self.catalog.used(tv_id, remote.current_app)
         self.catalog.ensure([pkg for pkg, _ in APPS] + self.catalog.recent(tv_id))
+        # Reconnecting for typing keeps the ADB link; a new connect asks the TV again.
+        if self.play_state:
+            self.adb.start(host, fresh=not ime or self.adb.host != host)
         return {"host": host, "actions": sorted(KEYS) + ["keyboard"]}
 
     async def op_disconnect(self, req):
+        self._drop_remote()
+        self.adb.close()
+        return None
+
+    def _drop_remote(self):
         if self.remote is not None:
             remote, self.remote = self.remote, None
             remote.disconnect()
-        return None
 
     async def op_action(self, req):
         remote = self._need_remote()
@@ -391,6 +515,13 @@ class Driver:
             "id": "apps", "label": "App", "symbol": "square.grid.2x2", "current": None,
             "options": options, "recent": tiles, "active": remote.current_app,
         }
+        if self.play_state:  # retried while ADB is off on the TV
+            self.adb.start(self.tv.get("host") if self.tv else None)
+        playing = await self.adb.playing()
+        if on is False:
+            playing = False if self.adb.device else None  # standby: nothing plays
+        if playing is not None:
+            result["playing"] = playing
         return result
 
     async def op_pick(self, req):
@@ -521,6 +652,7 @@ async def main():
         sys.stdout.flush()
     await driver.op_disconnect({})
     await driver.op_pair_cancel({})
+    driver.adb.close()
 
 
 if __name__ == "__main__":

@@ -26,12 +26,19 @@
   ],
   "does_not_work": [
     "Apple TV 3rd generation and older (no Companion protocol).",
-    "Volume level and now-playing info are not shown: the remote only sends volume steps."
+    "Volume level is not shown: the remote only sends volume steps."
   ],
   "notes": [
     "Uses pyatv: from pipx (pipx install pyatv) if present, otherwise the app installs it into its own folder. Credentials live in ~/.pyatv.conf, shared with the atvremote CLI.",
     "Volume keys work when the Apple TV controls the volume (HDMI-CEC to the TV, or HomePods).",
     "Connecting to a sleeping Apple TV takes about 5 seconds; an awake one answers at once.",
     "Typing (K) needs a selected text field on the Apple TV (search, login). There is no Return key over this protocol; search updates as you type."
+  ],
+  "options": [
+    {
+      "id": "play_state",
+      "title": "Show play/pause state",
+      "help": "The Mac's Now Playing shows whether the Apple TV plays or is paused. It uses a second, AirPlay link, which needs one more PIN: after turning this on, add the Apple TV again (Add TV…). Off: the Mac always shows it as playing."
+    }
   ]
 }

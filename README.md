@@ -14,6 +14,9 @@ support for other TVs with a driver written in any language.
 - **Full keyboard control.** Arrows, Return = OK, Esc/⌫ = Back, Space = Play/Pause. Keys can be
   held to repeat; press `?` for the full list.
 - **Mac media keys.** F7 / F8 / F9 rewind, play/pause and fast-forward on the TV.
+- **Play/pause state** (optional, per TV in Settings → TVs). The Mac's Now Playing shows
+  whether the TV plays or is paused: Apple TV over a second AirPlay link (one more PIN when
+  pairing), Android TV over ADB (network debugging on). Off, the TV always shows as playing.
 - **Typing.** `K` opens a text field whose contents go to the selected field on the TV as you
   type, so you don't have to pick letters from an on-screen keyboard (Apple TV, Android TV).
 - **Sound from another TV.** A box on a TV's HDMI input (e.g. a Google TV box on a Philips) can

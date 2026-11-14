@@ -110,6 +110,10 @@ final class PairingFlow: ObservableObject {
         message = nil
         do {
             model.adopt(try await driver.finishPairing(pin: pin))
+        } catch TVError.anotherPin(let text) {
+            prompt = text
+            pin = ""
+            step = .pin
         } catch {
             message = error.localizedDescription
             step = .pin
