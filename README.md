@@ -54,8 +54,13 @@ open ~/Applications/"TV Remote.app"
 ```
 
 `build.sh` compiles `App/*.swift` with `swiftc` (no Xcode project) into
-`~/Applications/TV Remote.app` and signs it ad hoc. On first launch macOS asks for access to
-the local network; the app needs it to find and control TVs.
+`~/Applications/TV Remote.app`. On first launch macOS asks for access to the local network;
+the app needs it to find and control TVs.
+
+Run `./make-cert.sh` once before building: it puts a self-signed certificate into the login
+keychain, and `build.sh` signs with it. Without it the app is signed ad hoc, macOS sees every
+build as a new app and drops the local network permission (TVs then show "not found" until
+you switch TV Remote off and on in System Settings → Privacy & Security → Local Network).
 
 Pair a TV: it must be on and on the same network. Pick it from the list and type the PIN shown
 on screen. An Apple TV already paired with `atvremote` (`~/.pyatv.conf`) is added without a PIN.
